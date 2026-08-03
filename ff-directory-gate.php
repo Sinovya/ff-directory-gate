@@ -2,7 +2,7 @@
 /**
  * Plugin Name: FF Directory Gate
  * Description: Entitlement seam and access gate for paid Directory access. Registers the directory_member role, provides ff_dir_user_can() - the single function every gate consults - and gates the carrier surfaces.
- * Version: 0.8.1
+ * Version: 0.9.0
  * Author: FreightForge
  *
  * PHASE 1 (0.1.0): role + entitlement function + WP-CLI provisioning. Inert.
@@ -39,7 +39,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'FF_DIR_GATE_VERSION', '0.8.1' );
+define( 'FF_DIR_GATE_VERSION', '0.9.0' );
 define( 'FF_DIR_ROLE', 'directory_member' );
 
 /**
@@ -1372,6 +1372,106 @@ function ff_dir_bricks_render_content( $content, $post = null, $context = 'text'
 	}
 
 	return $content;
+}
+
+/**
+ * ============================================================
+ * GRACE REMINDER
+ *
+ * A customer whose payment has lapsed keeps working, so they have no reason to
+ * visit the site and discover the banner. Without an email the first thing they
+ * notice is the day access stops - which is the worst possible moment to find
+ * out. This sends one reminder per billing period.
+ *
+ * Deliberately date-driven and independent of any billing system: it fires off
+ * paid_through, the same field everything else uses. When a billing engine is
+ * chosen this can be replaced by its own dunning email without touching the gate.
+ *
+ * Sends ONCE per period. The marker stores the paid-through date it was sent
+ * for, so renewing (which moves that date) automatically re-arms it.
+ * ============================================================
+ */
+add_action( 'init', 'ff_dir_schedule_grace_reminder' );
+function ff_dir_schedule_grace_reminder() {
+
+	if ( ! wp_next_scheduled( 'ff_dir_grace_reminder' ) ) {
+		wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', 'ff_dir_grace_reminder' );
+	}
+}
+
+add_action( 'ff_dir_grace_reminder', 'ff_dir_send_grace_reminders' );
+function ff_dir_send_grace_reminders() {
+
+	if ( ! ff_dir_gate_enabled() ) {
+		return 0;
+	}
+
+	$users = get_users( array(
+		'role'   => FF_DIR_ROLE,
+		'fields' => array( 'ID', 'user_email', 'display_name' ),
+	) );
+
+	$sent = 0;
+
+	foreach ( $users as $user ) {
+
+		if ( 'grace' !== ff_dir_access_state( $user->ID ) ) {
+			continue;
+		}
+
+		$period = ff_dir_paid_through( $user->ID );
+
+		// Already told them about THIS period.
+		if ( get_user_meta( $user->ID, 'ff_dir_grace_notified', true ) === $period ) {
+			continue;
+		}
+
+		if ( ff_dir_send_grace_email( $user ) ) {
+			update_user_meta( $user->ID, 'ff_dir_grace_notified', $period );
+			$sent++;
+		}
+	}
+
+	return $sent;
+}
+
+function ff_dir_send_grace_email( $user ) {
+
+	$left = ff_dir_grace_days_remaining( $user->ID );
+	$ends = ff_dir_access_expiry_date( $user->ID );
+	$name = $user->display_name ? $user->display_name : $user->user_email;
+
+	$subject = apply_filters(
+		'ff_dir_grace_email_subject',
+		'Your FreightForge Directory access needs renewing',
+		$user
+	);
+
+	$body = sprintf(
+		"Hi %s,\n\n"
+		. "We haven't received your latest payment for the FreightForge Directory.\n\n"
+		. "Your access is still working - you have %d %s remaining, until %s. "
+		. "After that, carrier names, contact details and export will pause until the account is brought up to date.\n\n"
+		. "To renew, reply to this email or call (612) 804-0064.\n\n"
+		. "Sign in: %s\n\n"
+		. "- The FreightForge team",
+		$name,
+		$left,
+		1 === $left ? 'day' : 'days',
+		$ends,
+		ff_dir_login_url()
+	);
+
+	$body = apply_filters( 'ff_dir_grace_email_body', $body, $user, $left, $ends );
+
+	return wp_mail( $user->user_email, $subject, $body );
+}
+
+if ( defined( 'WP_CLI' ) && WP_CLI ) {
+	WP_CLI::add_command( 'ff-dir grace-reminders', function () {
+		$sent = ff_dir_send_grace_reminders();
+		WP_CLI::success( 'grace reminders sent: ' . (int) $sent );
+	} );
 }
 
 /**
