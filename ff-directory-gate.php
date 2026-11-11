@@ -2,7 +2,7 @@
 /**
  * Plugin Name: FF Directory Gate
  * Description: Entitlement seam and access gate for paid Directory access. Registers the directory_member role, provides ff_dir_user_can() - the single function every gate consults - and gates the carrier surfaces.
- * Version: 0.9.0
+ * Version: 0.9.1
  * Author: FreightForge
  *
  * PHASE 1 (0.1.0): role + entitlement function + WP-CLI provisioning. Inert.
@@ -39,7 +39,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'FF_DIR_GATE_VERSION', '0.9.0' );
+define( 'FF_DIR_GATE_VERSION', '0.9.1' );
 define( 'FF_DIR_ROLE', 'directory_member' );
 
 /**
@@ -868,6 +868,17 @@ function ff_dir_identity_facets() {
 add_filter( 'facetwp_facets', 'ff_dir_strip_identity_facets' );
 function ff_dir_strip_identity_facets( $facets ) {
 
+	// The INDEXER must always see every facet. FacetWP builds its facet list
+	// once per request, and indexing usually runs with no logged-in member
+	// (WP-CLI rebuilds, cron, the refresh sync at shutdown after an API call).
+	// Stripped there, a full rebuild wrote no USDOT/name rows at all and every
+	// single-carrier re-index deleted that carrier's rows - USDOT search found
+	// 8 of 20,759 carriers on production (found 2026-11-11). Hiding is for
+	// what a visitor can query, which never happens in these contexts.
+	if ( ! empty( $GLOBALS['ff_dir_fwp_indexing'] ) || ( defined( 'WP_CLI' ) && WP_CLI ) || wp_doing_cron() ) {
+		return $facets;
+	}
+
 	if ( ! ff_dir_teaser_active() ) {
 		return $facets;
 	}
@@ -881,6 +892,29 @@ function ff_dir_strip_identity_facets( $facets ) {
 	}
 
 	return array_values( $facets );
+}
+
+/**
+ * A re-index inside a visitor's web request (save_post, the refresh sync's
+ * shutdown hook) starts from the visitor's stripped list. Reload the full
+ * list just for the index, then put the visitor's list back.
+ * facetwp_indexer_query_args fires in index() before it reads the facets.
+ */
+add_filter( 'facetwp_indexer_query_args', 'ff_dir_fwp_index_full_list', 1 );
+function ff_dir_fwp_index_full_list( $args ) {
+	if ( empty( $GLOBALS['ff_dir_fwp_indexing'] ) && ff_dir_teaser_active() && function_exists( 'FWP' ) ) {
+		$GLOBALS['ff_dir_fwp_indexing'] = true;
+		FWP()->helper->settings         = FWP()->helper->load_settings();
+	}
+	return $args;
+}
+
+add_action( 'facetwp_indexer_complete', 'ff_dir_fwp_index_restore_list' );
+function ff_dir_fwp_index_restore_list() {
+	if ( ! empty( $GLOBALS['ff_dir_fwp_indexing'] ) && function_exists( 'FWP' ) ) {
+		$GLOBALS['ff_dir_fwp_indexing'] = false;
+		FWP()->helper->settings         = FWP()->helper->load_settings();
+	}
 }
 
 /**
