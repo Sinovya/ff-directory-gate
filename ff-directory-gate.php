@@ -2,7 +2,7 @@
 /**
  * Plugin Name: FF Directory Gate
  * Description: Entitlement seam and access gate for paid Directory access. Registers the directory_member role, provides ff_dir_user_can() - the single function every gate consults - and gates the carrier surfaces.
- * Version: 0.9.1
+ * Version: 0.9.2
  * Author: FreightForge
  *
  * PHASE 1 (0.1.0): role + entitlement function + WP-CLI provisioning. Inert.
@@ -39,7 +39,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'FF_DIR_GATE_VERSION', '0.9.1' );
+define( 'FF_DIR_GATE_VERSION', '0.9.2' );
 define( 'FF_DIR_ROLE', 'directory_member' );
 
 /**
@@ -892,6 +892,29 @@ function ff_dir_strip_identity_facets( $facets ) {
 	}
 
 	return array_values( $facets );
+}
+
+/**
+ * Removing a facet from the registry does NOT close its autocomplete:
+ * FacetWP's facetwp_autocomplete_load runs its SQL by the POSTed facet_name
+ * straight against the index, registered or not. Now that the identity
+ * facets are indexed (0.9.1), a visitor without search could read USDOT
+ * numbers and legal names from it. Answer only for facets this visitor's own
+ * registry has, matched exactly (MySQL would also match "USDOT_NUMBER" or a
+ * trailing space). facetwp_init fires after FacetWP has read the request
+ * (JSON bodies included) and before it answers on facetwp_found_main_query
+ * or on its REST route.
+ */
+add_action( 'facetwp_init', 'ff_dir_guard_autocomplete', 0 );
+function ff_dir_guard_autocomplete() {
+	if ( 'facetwp_autocomplete_load' !== ( $_POST['action'] ?? '' ) || ! ff_dir_teaser_active() ) { // phpcs:ignore WordPress.Security.NonceVerification
+		return;
+	}
+	$asked   = (string) ( $_POST['facet_name'] ?? '' ); // phpcs:ignore WordPress.Security.NonceVerification
+	$allowed = wp_list_pluck( (array) FWP()->helper->get_facets(), 'name' );
+	if ( ! in_array( $asked, $allowed, true ) || in_array( strtolower( trim( $asked ) ), ff_dir_identity_facets(), true ) ) {
+		wp_send_json( array() );
+	}
 }
 
 /**
